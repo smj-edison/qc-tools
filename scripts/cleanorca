@@ -1,0 +1,16 @@
+#!/bin/bash
+
+rm *.tmp
+rm *.engrad
+rm *.carthess
+rm *.hess
+rm *.densities
+rm *.densitiesinfo
+rm *.hostnames
+rm *.bas[0-9]
+rm *.0
+rm *.gbw
+rm *.property.txt
+rm *.opt
+rm *_trj.xyz
+rm *.bibtex

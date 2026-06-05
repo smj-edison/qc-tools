@@ -1,0 +1,80 @@
+#!/bin/python3
+
+import os
+import subprocess
+from pathlib import Path
+import argparse
+
+parser: argparse.ArgumentParser = argparse.ArgumentParser(description="Create and run Gaussian job from .gjf or .com file")
+parser.add_argument("file", type=Path, help="Name of .gjf or .com file")
+parser.add_argument("-t", "--time", type=str, help="Walltime for job (format d-hh:mm:ss)", required=True)
+parser.add_argument("-q", "--qos", type=str.lower, choices=["normal","standby", "test"], help="Quality of service (\"normal\", \"standby\", or \"test\")", required=True)
+args = parser.parse_args()
+
+inputfile: Path = Path(args.file)
+if not inputfile.exists():
+    raise ValueError(f"{args.file} does not exist.")
+elif inputfile.suffix != ".gjf" and inputfile.suffix != ".com":
+    raise ValueError(f"{args.file} is not a .gjf or .com file.")
+
+inputfile_text: str = inputfile.read_text()
+inputfile_lines: list[str] = [line for line in inputfile_text.split('\n')]
+
+## Finding nprocshared
+nprocshared_lines: list[str] = [line for line in inputfile_lines if "%nprocshared" in line.casefold()]
+if len(nprocshared_lines) == 0:
+    nprocs: int = 1
+elif len(nprocshared_lines) > 0:
+    nprocs_list: list[int] = [int(line.split('=')[-1]) for line in nprocshared_lines]
+    nprocs: int = max(nprocs_list)
+
+## Finding mem (in MB)
+mem_lines: list[str] = [line for line in inputfile_lines if "%mem" in line.casefold()]
+if len(mem_lines) == 0:
+    mem: int = int(4000 * nprocs)
+elif len(mem_lines) > 0:
+    mem_strs: list[str] = [line.split('=')[-1].casefold().strip() for line in mem_lines]
+    mem_nums: list[int] = list()
+    for mem_str in mem_strs:
+        mem_num: int = int(''.join([c for c in mem_str if c.isnumeric()]))
+        if mem_str.endswith("mb"):
+            mem_nums.append(mem_num)
+        elif mem_str.endswith("gb"):
+            mem_nums.append(mem_num * 1000)
+        else:
+            raise ValueError("Unrecognized unit in mem specification. Check input.")
+    mem: int = max(mem_nums)
+
+mem += 2000
+
+## Checking for a blank line at end of input file and inserting if one is not found
+last_chars: str = inputfile_text[-2:]
+if last_chars != "\n\n":
+    inputfile.write_text(inputfile_text + '\n')
+
+## Creating, writing, submitting, and deleting .job file
+jobfile: Path = inputfile.with_suffix(".job")
+
+jobfile_lines: str = f"""#!/bin/bash
+#SBATCH --time={args.time}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node={nprocs}
+#SBATCH --mem={mem}MB
+#SBATCH --qos={args.qos}
+#SBATCH --verbose
+
+set -e
+set -o pipefail
+
+module load g16
+[ `cat /proc/cpuinfo | grep -m 1 vendor_id | awk '{{print $3}}'` == 'AuthenticAMD' ] && export PGI_FASTMATH_CPU=haswell
+export GAUSS_SCRDIR=/tmp/${{SLURM_JOB_ID}}
+mkdir -p $GAUSS_SCRDIR
+g16 '{inputfile}'
+"""
+
+jobfile.write_text(jobfile_lines)
+
+subprocess.run(["sbatch", str(jobfile)], check=True)
+
+os.remove(jobfile)

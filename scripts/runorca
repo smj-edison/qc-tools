@@ -1,0 +1,80 @@
+#!/bin/python3
+
+import os
+import subprocess
+from pathlib import Path
+import argparse
+
+parser: argparse.ArgumentParser = argparse.ArgumentParser(description="Create and run ORCA job from .inp file")
+parser.add_argument("file", type=Path, help="Name of .inp file")
+parser.add_argument("-t", "--time", type=str, help="Walltime for job (format d-hh:mm:ss)", required=True)
+parser.add_argument("-q", "--qos", type=str.lower, choices=["normal","standby", "test"], help='Quality of service ("normal", "standby", or "test")', required=True)
+args = parser.parse_args()
+
+inputfile: Path = Path(args.file)
+if not inputfile.exists():
+    raise ValueError(f"{args.file} does not exist.")
+elif inputfile.suffix != ".inp":
+    raise ValueError(f"{args.file} is not a .inp file.")
+
+inputfile_text: str = inputfile.read_text()
+inputfile_lines: list[str] = [line for line in inputfile_text.split('\n')]
+
+## Finding nprocs in %pal block
+nprocs: int = 1
+in_pal: bool = False
+for line in inputfile_lines:
+    stripped: str = line.strip().casefold()
+    if stripped.startswith("%pal"):
+        in_pal = True
+    if in_pal and "nprocs" in stripped:
+        parts: list[str] = stripped.split()
+        for i, part in enumerate(parts):
+            if part == "nprocs" and i + 1 < len(parts):
+                nprocs = int(parts[i + 1])
+                break
+    if in_pal and stripped == "end":
+        in_pal = False
+        break
+
+## Finding maxcore (in MB per core)
+maxcore: int = 3000
+for line in inputfile_lines:
+    stripped: str = line.strip().casefold()
+    if stripped.startswith("%maxcore"):
+        parts: list[str] = stripped.split()
+        if len(parts) >= 2:
+            maxcore = int(parts[1])
+        break
+
+mem: int = maxcore * nprocs
+mem *= 1.1
+
+## Creating, writing, submitting, and deleting .job file
+jobfile: Path = inputfile.with_suffix(".job")
+
+jobfile_lines: str = f"""#!/bin/bash
+#SBATCH --time={args.time}
+#SBATCH --nodes=1
+#SBATCH --ntasks-per-node={nprocs}
+#SBATCH --mem={mem}MB
+#SBATCH --qos={args.qos}
+#SBATCH --verbose
+#SBATCH -C 'avx2'
+
+set -e
+set -o pipefail
+
+module load openmpi/4.1.6-fgmxkt2
+
+export PATH=$PATH:/apps/spack/root/opt/spack/linux-rhel9-haswell/gcc-13.2.0/openmpi-4.1.6-fgmxkt2g2rgotd254h2b6gsnezkcld6e/bin
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/apps/spack/root/opt/spack/linux-rhel9-haswell/gcc-13.2.0/openmpi-4.1.6-fgmxkt2g2rgotd254h2b6gsnezkcld6e/lib
+
+~/bin/orca_6_1_1_linux_x86-64_shared_openmpi418_avx2/orca '{inputfile}' > '{inputfile.with_suffix(".out")}'
+"""
+
+jobfile.write_text(jobfile_lines)
+
+subprocess.run(["sbatch", str(jobfile)], check=True)
+
+os.remove(jobfile)

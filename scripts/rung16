@@ -32,7 +32,7 @@ elif len(nprocshared_lines) > 0:
 mem_lines: list[str] = [line for line in inputfile_lines if "%mem" in line.casefold()]
 if len(mem_lines) == 0:
     mem: int = int(4000 * nprocs)
-elif len(mem_lines) > 0:
+else:
     mem_strs: list[str] = [line.split('=')[-1].casefold().strip() for line in mem_lines]
     mem_nums: list[int] = list()
     for mem_str in mem_strs:
@@ -45,7 +45,7 @@ elif len(mem_lines) > 0:
             raise ValueError("Unrecognized unit in mem specification. Check input.")
     mem: int = max(mem_nums)
 
-mem += 2000
+mem = int(mem * 1.5)
 
 ## Checking for a blank line at end of input file and inserting if one is not found
 last_chars: str = inputfile_text[-2:]

@@ -5,6 +5,34 @@ import subprocess
 from pathlib import Path
 import argparse
 
+
+def parse_nprocshared(section_lines: list[str]) -> int:
+    """Return the %nprocshared value in a single link section's lines."""
+    nprocshared_lines: list[str] = [line for line in section_lines if "%nprocshared" in line.casefold()]
+    if len(nprocshared_lines) == 0:
+        raise ValueError("No %nprocshared line found in a link section (Gaussian would silently default to 1 processor).")
+    if len(nprocshared_lines) > 1:
+        raise ValueError(f"Multiple %nprocshared lines found in the same link section: {nprocshared_lines}")
+    return int(nprocshared_lines[0].split('=')[-1])
+
+
+def parse_mem_mb(section_lines: list[str]) -> int:
+    """Return the %mem value (in MB) in a single link section's lines."""
+    mem_lines: list[str] = [line for line in section_lines if "%mem" in line.casefold()]
+    if len(mem_lines) == 0:
+        raise ValueError("No %mem line found in a link section (Gaussian would silently fall back to its own default).")
+    if len(mem_lines) > 1:
+        raise ValueError(f"Multiple %mem lines found in the same link section: {mem_lines}")
+    mem_str: str = mem_lines[0].split('=')[-1].casefold().strip()
+    mem_num: int = int(''.join([c for c in mem_str if c.isnumeric()]))
+    if mem_str.endswith("mb"):
+        return mem_num
+    elif mem_str.endswith("gb"):
+        return mem_num * 1000
+    else:
+        raise ValueError("Unrecognized unit in mem specification. Check input.")
+
+
 parser: argparse.ArgumentParser = argparse.ArgumentParser(description="Create and run Gaussian job from .gjf or .com file")
 parser.add_argument("file", type=Path, help="Name of .gjf or .com file")
 parser.add_argument("-t", "--time", type=str, help="Walltime for job (format d-hh:mm:ss)", required=True)
@@ -20,41 +48,47 @@ elif inputfile.suffix != ".gjf" and inputfile.suffix != ".com":
 inputfile_text: str = inputfile.read_text()
 inputfile_lines: list[str] = [line for line in inputfile_text.split('\n')]
 
-## Finding nprocshared
-nprocshared_lines: list[str] = [line for line in inputfile_lines if "%nprocshared" in line.casefold()]
-if len(nprocshared_lines) == 0:
-    nprocs: int = 1
-elif len(nprocshared_lines) > 0:
-    nprocs_list: list[int] = [int(line.split('=')[-1]) for line in nprocshared_lines]
-    nprocs: int = max(nprocs_list)
+## Splitting into link sections (Gaussian's --Link1-- syntax) up front, since
+## Gaussian does not carry %-commands forward between link sections - each
+## one needs its own %nprocshared/%mem/%chk or it silently falls back to
+## Gaussian's own defaults rather than erroring. Doing this split once makes
+## every per-section field available for both the job's resource request and
+## cross-section consistency warnings below.
+link_sections: list[list[str]] = [[]]
+for line in inputfile_lines:
+    if line.strip().casefold() == "--link1--":
+        link_sections.append([])
+    else:
+        link_sections[-1].append(line)
 
-## Finding mem (in MB)
-mem_lines: list[str] = [line for line in inputfile_lines if "%mem" in line.casefold()]
-if len(mem_lines) == 0:
-    mem: int = int(4000 * nprocs)
-else:
-    mem_strs: list[str] = [line.split('=')[-1].casefold().strip() for line in mem_lines]
-    mem_nums: list[int] = list()
-    for mem_str in mem_strs:
-        mem_num: int = int(''.join([c for c in mem_str if c.isnumeric()]))
-        if mem_str.endswith("mb"):
-            mem_nums.append(mem_num)
-        elif mem_str.endswith("gb"):
-            mem_nums.append(mem_num * 1000)
-        else:
-            raise ValueError("Unrecognized unit in mem specification. Check input.")
-    mem: int = max(mem_nums)
+section_nprocs: list[int] = [parse_nprocshared(section) for section in link_sections]
+section_mem: list[int] = [parse_mem_mb(section) for section in link_sections]
 
+## Finding nprocshared and mem (in MB) across all link sections
+nprocs: int = max(section_nprocs)
+mem: int = max(section_mem)
 mem = int(mem * 1.5)
+
+## Warning if link sections request different resources from one another
+if len(link_sections) > 1:
+    if len(set(section_nprocs)) > 1:
+        print(f"Warning: %nprocshared differs between link sections: {section_nprocs}")
+    if len(set(section_mem)) > 1:
+        print(f"Warning: %mem differs between link sections (in MB): {section_mem}")
 
 ## Checking that any %chk lines point to a file matching the input file's name
 chk_lines: list[str] = [line for line in inputfile_lines if "%chk" in line.casefold()]
+expected_chk: str = inputfile.with_suffix(".chk").name
 for line in chk_lines:
-    print(f"Using checkpoint {line.split('=')[-1].strip()}")
+    chk_name: str = Path(line.split('=')[-1].strip()).name
+    print(f"Using checkpoint {chk_name}")
+    if chk_name != expected_chk:
+        print(f"    (note that this differs from job file name, {inputfile})")
 
 ## Checking for a blank line at end of input file and inserting if one is not found
 last_chars: str = inputfile_text[-2:]
 if last_chars != "\n\n":
+    print(f"Warning: {inputfile} did not end with a blank line, appending one.")
     inputfile.write_text(inputfile_text + '\n')
 
 ## Creating, writing, submitting, and deleting .job file

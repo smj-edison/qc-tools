@@ -1,0 +1,4 @@
+#!/bin/bash
+# Stand-in for the real `sbatch` used in tests so job scripts are inspected
+# instead of actually being submitted to Slurm.
+cat "$1"

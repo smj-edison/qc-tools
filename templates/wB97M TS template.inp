@@ -3,7 +3,7 @@
 Calc_hess true
 end
 %pal nprocs 24 end
-%maxcore 3000
+%maxcore 2000
 *xyz 1 1
 C       -1.500000000     -3.600000000      3.100000000
 C       -2.300000000     -3.800000000      2.100000000

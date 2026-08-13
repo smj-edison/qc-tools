@@ -1,0 +1,22 @@
+%nprocshared=48
+%mem=96GB
+%chk=BAD_CHECKPOINT_NAME
+#opt=modredundant B3LYP/def2tzvp em=gd3bj
+
+Untitled
+
+1 1
+C       -1.500000000     -3.600000000      3.100000000
+C       -2.300000000     -3.800000000      2.100000000
+C       -2.500000000     -2.800000000      1.100000000
+
+B 1 2 F
+B 2 3 F
+B 1 3 F
+
+--link1--
+%nprocshared=48
+%mem=96GB
+%chk=BAD_CHECKPOINT_NAME
+#opt=(calcfc,ts,noeigen,nofreeze,gdiis,maxstep=13) freq B3LYP/def2tzvp em=gd3bj geom=allchk
+

@@ -47,6 +47,14 @@ else:
 
 mem = int(mem * 1.5)
 
+## Checking that any %chk lines point to a file matching the input file's name
+chk_lines: list[str] = [line for line in inputfile_lines if "%chk" in line.casefold()]
+expected_chk: str = inputfile.with_suffix(".chk").name
+for line in chk_lines:
+    chk_name: str = Path(line.split('=')[-1].strip()).name
+    if chk_name != expected_chk:
+        raise ValueError(f"%chk line \"{line.strip()}\" does not match expected checkpoint file name \"{expected_chk}\".")
+
 ## Checking for a blank line at end of input file and inserting if one is not found
 last_chars: str = inputfile_text[-2:]
 if last_chars != "\n\n":

@@ -16,8 +16,8 @@ def parse_nprocshared(section_lines: list[str]) -> int:
     return int(nprocshared_lines[0].split('=')[-1])
 
 
-def parse_mem_mb(section_lines: list[str]) -> int:
-    """Return the %mem value (in MB) in a single link section's lines."""
+def parse_mem_mib(section_lines: list[str]) -> int:
+    """Return the %mem value (in MiB) in a single link section's lines."""
     mem_lines: list[str] = [line for line in section_lines if "%mem" in line.casefold()]
     if len(mem_lines) == 0:
         raise ValueError("No %mem line found in a link section (Gaussian would silently fall back to its own default).")
@@ -28,7 +28,7 @@ def parse_mem_mb(section_lines: list[str]) -> int:
     if mem_str.endswith("mb"):
         return mem_num
     elif mem_str.endswith("gb"):
-        return mem_num * 1000
+        return mem_num * 1024
     else:
         raise ValueError("Unrecognized unit in mem specification. Check input.")
 
@@ -62,19 +62,20 @@ for line in inputfile_lines:
         link_sections[-1].append(line)
 
 section_nprocs: list[int] = [parse_nprocshared(section) for section in link_sections]
-section_mem: list[int] = [parse_mem_mb(section) for section in link_sections]
+section_mem: list[int] = [parse_mem_mib(section) for section in link_sections]
 
-## Finding nprocshared and mem (in MB) across all link sections
+## Finding nprocshared and mem (in MiB) across all link sections
 nprocs: int = max(section_nprocs)
 mem: int = max(section_mem)
-mem = int(mem * 1.5)
+# I've found that it needs about 6 GiB of headroom.
+mem = mem + 8
 
 ## Warning if link sections request different resources from one another
 if len(link_sections) > 1:
     if len(set(section_nprocs)) > 1:
         print(f"Warning: %nprocshared differs between link sections: {section_nprocs}")
     if len(set(section_mem)) > 1:
-        print(f"Warning: %mem differs between link sections (in MB): {section_mem}")
+        print(f"Warning: %mem differs between link sections (in MiB): {section_mem}")
 
 ## Checking that any %chk lines point to a file matching the input file's name
 chk_lines: list[str] = [line for line in inputfile_lines if "%chk" in line.casefold()]

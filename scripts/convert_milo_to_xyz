@@ -1,0 +1,12 @@
+#!/bin/bash
+# Convert every Milo .out in the job subdirectories to .xyz here in this directory.
+set -euo pipefail
+
+cd "$(dirname "$0")"
+
+for out in */*/*.out; do
+    [ -e "$out" ] || continue
+    xyz="$(basename "${out%.out}").xyz"
+    milo_out_to_xyz < "$out" > "$xyz"
+    echo "$out -> $xyz"
+done

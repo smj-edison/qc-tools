@@ -1,2 +1,4 @@
 milo/
 __pycache__/
+.zig-cache
+zig-out

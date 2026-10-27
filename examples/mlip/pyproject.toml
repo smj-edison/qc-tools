@@ -1,0 +1,44 @@
+[project]
+name = "mlip"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = "==3.12.*"
+dependencies = [
+    "ase>=3.29.0",
+    "ipykernel>=7.4.0",
+    "notebook>=7.6.3",
+    "numpy>=2.5.4",
+    "orb-models>=0.7.0",
+    "plumed>=2.10.0",
+    "plumed-bin==2.10.2",
+]
+
+[project.optional-dependencies]
+cpu = [
+    "torch",
+]
+cuda = [
+    "torch",
+]
+
+[tool.uv]
+conflicts = [
+    [ { extra = "cpu" }, { extra = "cuda" } ]
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cuda"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+plumed-bin = { path = "packages/plumed-bin", editable = false }
+torch = [
+    { index = "pytorch-cpu", extra = "cpu" },
+    { index = "pytorch-cuda", extra = "cuda" },
+]

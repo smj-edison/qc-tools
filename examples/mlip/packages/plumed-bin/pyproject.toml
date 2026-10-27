@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "zstandard"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plumed-bin"
+version = "2.10.2"
+description = "Prebuilt PLUMED binary and runtime integration"
+dependencies = [
+    "plumed>=2.10.0",
+]
+
+[project.scripts]
+plumed = "plumed_bin.cli:main"

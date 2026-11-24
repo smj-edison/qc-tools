@@ -1,4 +1,5 @@
 import re
+from pathlib import Path
 
 import pytest
 
@@ -40,3 +41,32 @@ def test_rejects_wrong_extension(run_script, tmp_path):
 
     assert result.returncode != 0
     assert "not a .inp file" in result.stderr
+
+
+@pytest.mark.parametrize(
+    "prefix_args, expected",
+    [
+        ([], Path.home() / "bin/orca_6_1_1_linux_x86-64_shared_openmpi418_avx2/orca"),
+        (["--prefix", "/opt/orca/"], "/opt/orca/orca"),
+        (["-p", "~/my-orca"], Path.home() / "my-orca/orca"),
+        (["-p", "/opt/my orca"], "'/opt/my orca/orca'"),
+    ],
+)
+def test_orca_prefix(run_script, tmp_path, prefix_args, expected):
+    dest = tmp_path / "mol.inp"
+    dest.write_text("! SP")
+
+    result = run_script("runorca", dest, "-t", "1-00:00:00", "-q", "test", *prefix_args)
+
+    assert result.returncode == 0, result.stderr
+    assert f"\n{expected} '{dest}' > " in result.stdout
+
+
+def test_relative_orca_prefix_is_made_absolute(run_script, tmp_path):
+    dest = tmp_path / "mol.inp"
+    dest.write_text("! SP")
+
+    result = run_script("runorca", dest, "-t", "1-00:00:00", "-q", "test", "-p", ".")
+
+    assert result.returncode == 0, result.stderr
+    assert f"\n{tmp_path / 'orca'} '" in result.stdout

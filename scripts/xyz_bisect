@@ -1,0 +1,477 @@
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.9"
+# dependencies = [
+#     "ase",
+# ]
+# ///
+
+"""
+xyz_bisect: Binary search tool to find where a molecular trajectory went wrong.
+
+Workflow:
+1. User calls xyz_bisect with a .traj file (using ase.io.Trajectory).
+2. The tool writes current.xyz that the user can open in their molecular viewer.
+3. The user inspects the structure and marks it good or bad in the terminal.
+4. The tool archives the step (e.g. step-1-13001.xyz), updates search bounds,
+   advances to the next step, and updates current.xyz.
+5. Repeats until the exact transition point is found.
+"""
+
+from __future__ import annotations
+
+import argparse
+import math
+import os
+import sys
+from pathlib import Path
+from typing import Any, List, Optional, Tuple
+
+
+def open_trajectory(traj_path: Path | str) -> Any:
+    """Open a trajectory file using ase.io.Trajectory for .traj files, or ase.io.read for others."""
+    path_str = str(traj_path)
+    if not os.path.exists(path_str):
+        raise FileNotFoundError(f"Trajectory file not found: {path_str}")
+
+    if path_str.endswith(".traj"):
+        from ase.io.trajectory import Trajectory
+
+        return Trajectory(path_str)
+    else:
+        from ase.io import read
+
+        return read(path_str, index=":")
+
+
+def write_xyz_frame(
+    output_path: Path | str,
+    atoms: Any,
+    comment: str = "",
+) -> None:
+    """Write an ASE Atoms object to an XYZ file with an informative comment line."""
+    from ase.io import write
+
+    out_p = Path(output_path)
+    out_p.parent.mkdir(parents=True, exist_ok=True)
+    write(str(out_p), atoms, format="xyz", comment=comment)
+
+
+class BisectState:
+    """Manages the binary search state over a molecular trajectory."""
+
+    def __init__(
+        self,
+        traj: Any,
+        good_idx: int = 0,
+        bad_idx: Optional[int] = None,
+        output_dir: Path | str = ".",
+        current_name: str = "current.xyz",
+        archive_steps: bool = True,
+    ):
+        self.traj = traj
+        self.num_frames = len(traj)
+        if self.num_frames == 0:
+            raise ValueError("Trajectory is empty (contains 0 frames).")
+
+        if bad_idx is None:
+            bad_idx = self.num_frames - 1
+
+        self._validate_index(good_idx, "good")
+        self._validate_index(bad_idx, "bad")
+
+        self.good_idx = good_idx
+        self.bad_idx = bad_idx
+        self.initial_good = good_idx
+        self.initial_bad = bad_idx
+
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.current_name = current_name
+        self.archive_steps = archive_steps
+
+        self.step_num = 1
+        self.history: List[dict] = []
+        self.current_mid: int = self.calculate_mid()
+
+    def _validate_index(self, idx: int, name: str) -> None:
+        if idx < 0 or idx >= self.num_frames:
+            raise IndexError(
+                f"Invalid {name} index {idx}. Trajectory has {self.num_frames} frames (0 to {self.num_frames - 1})."
+            )
+
+    @property
+    def current_xyz_path(self) -> Path:
+        return self.output_dir / self.current_name
+
+    def calculate_mid(self) -> int:
+        """Calculate the midpoint frame index between known good and bad bounds."""
+        return (self.good_idx + self.bad_idx) // 2
+
+    def is_complete(self) -> bool:
+        """Binary search completes when good and bad bounds are adjacent or identical."""
+        return abs(self.bad_idx - self.good_idx) <= 1
+
+    def estimated_remaining_steps(self) -> int:
+        diff = abs(self.bad_idx - self.good_idx)
+        if diff <= 1:
+            return 0
+        return max(1, math.ceil(math.log2(diff)))
+
+    def write_current(self, frame_idx: Optional[int] = None, custom_comment: Optional[str] = None) -> Path:
+        """Write a frame to current.xyz."""
+        idx = self.current_mid if frame_idx is None else frame_idx
+        self._validate_index(idx, "target")
+        atoms = self.traj[idx]
+        comment = custom_comment or f"Trajectory frame {idx} (Step {self.step_num})"
+        write_xyz_frame(self.current_xyz_path, atoms, comment=comment)
+        return self.current_xyz_path
+
+    def record_verdict(self, verdict: str) -> Tuple[Optional[Path], bool]:
+        """
+        Record user's decision for the current midpoint.
+        verdict: 'good' or 'bad'
+        Returns: (archived_file_path, is_complete)
+        """
+        verdict = verdict.strip().lower()
+        if verdict not in ("good", "bad"):
+            raise ValueError(f"Verdict must be 'good' or 'bad', got '{verdict}'")
+
+        mid = self.current_mid
+        step = self.step_num
+        atoms = self.traj[mid]
+
+        # 1. Archive the structure if archive_steps is True
+        archived_path: Optional[Path] = None
+        if self.archive_steps:
+            fname = f"step-{step}-{mid}.xyz"
+            archived_path = self.output_dir / fname
+            comment = f"Trajectory frame {mid} | Step {step} | Verdict: {verdict.upper()}"
+            write_xyz_frame(archived_path, atoms, comment=comment)
+
+        # 2. Record history for undo/status
+        entry = {
+            "step": step,
+            "index": mid,
+            "verdict": verdict,
+            "prev_good": self.good_idx,
+            "prev_bad": self.bad_idx,
+            "archived_path": archived_path,
+        }
+        self.history.append(entry)
+
+        # 3. Update search bounds
+        if verdict == "good":
+            self.good_idx = mid
+        else:
+            self.bad_idx = mid
+
+        self.step_num += 1
+
+        if self.is_complete():
+            # Write final summary structures
+            self._write_completion_files()
+            return archived_path, True
+
+        # Advance to next midpoint and write current.xyz
+        self.current_mid = self.calculate_mid()
+        self.write_current()
+        return archived_path, False
+
+    def undo(self) -> Optional[dict]:
+        """Undo the most recent step."""
+        if not self.history:
+            return None
+
+        last_entry = self.history.pop()
+        self.good_idx = last_entry["prev_good"]
+        self.bad_idx = last_entry["prev_bad"]
+        self.step_num = last_entry["step"]
+        self.current_mid = last_entry["index"]
+
+        # Restore current.xyz to the undone midpoint
+        self.write_current()
+        return last_entry
+
+    def _write_completion_files(self) -> None:
+        """Write first-bad-<idx>.xyz, last-good-<idx>.xyz, and update current.xyz upon completion."""
+        bad_atoms = self.traj[self.bad_idx]
+        good_atoms = self.traj[self.good_idx]
+
+        first_bad_indexed = self.output_dir / f"first-bad-{self.bad_idx}.xyz"
+        last_good_indexed = self.output_dir / f"last-good-{self.good_idx}.xyz"
+
+        bad_comment = f"Trajectory frame {self.bad_idx} | First bad structure (found in {len(self.history)} steps)"
+        good_comment = f"Trajectory frame {self.good_idx} | Last good structure (found in {len(self.history)} steps)"
+
+        # Write indexed versions (e.g. first-bad-13001.xyz)
+        write_xyz_frame(first_bad_indexed, bad_atoms, comment=bad_comment)
+        write_xyz_frame(last_good_indexed, good_atoms, comment=good_comment)
+
+        # Point current.xyz to the first bad structure for immediate viewing
+        write_xyz_frame(
+            self.current_xyz_path,
+            bad_atoms,
+            comment=f"Trajectory frame {self.bad_idx} | First bad structure",
+        )
+
+
+def format_step_banner(state: BisectState) -> str:
+    """Format an informative banner for the current step."""
+    direction = "ascending" if state.good_idx < state.bad_idx else "descending"
+    est = state.estimated_remaining_steps()
+    est_str = f"~{est} step{'s' if est != 1 else ''} remaining" if est > 0 else "final step"
+
+    lines = [
+        "=" * 60,
+        f" Step {state.step_num} | Inspecting Structure Index: {state.current_mid} (frame {state.current_mid + 1}/{state.num_frames})",
+        "-" * 60,
+        f" Search range: [good: {state.good_idx}, bad: {state.bad_idx}] ({direction}, {est_str})",
+        f" Written to:   {state.current_xyz_path.resolve()}",
+        "=" * 60,
+    ]
+    return "\n".join(lines)
+
+
+def format_status(state: BisectState) -> str:
+    """Format status table of history and current state."""
+    lines = [
+        "--- Bisect Status ---",
+        f"Trajectory frames: {state.num_frames} (indices 0 to {state.num_frames - 1})",
+        f"Known good index:  {state.good_idx}",
+        f"Known bad index:   {state.bad_idx}",
+        f"Current step:      {state.step_num}",
+        f"Current mid:       {state.current_mid}",
+        "History:",
+    ]
+    if not state.history:
+        lines.append("  (No steps recorded yet)")
+    else:
+        for entry in state.history:
+            lines.append(
+                f"  Step {entry['step']}: index {entry['index']} -> {entry['verdict'].upper()}"
+            )
+    lines.append("---------------------")
+    return "\n".join(lines)
+
+
+def format_help() -> str:
+    return """
+Available commands:
+  g, good, y, yes : Mark current structure as GOOD (went wrong AFTER this)
+  b, bad, n, no   : Mark current structure as BAD (went wrong AT or BEFORE this)
+  v, view <idx>   : Preview structure at index <idx> in current.xyz without deciding
+                    (type 'v' with no arguments to restore the current bisect structure)
+  u, undo         : Undo the previous decision and re-evaluate
+  s, status       : Print current bounds and history
+  h, help, ?      : Show this help message
+  q, quit, exit   : Quit xyz_bisect
+"""
+
+
+def format_completion_summary(state: BisectState) -> str:
+    first_bad_name = f"first-bad-{state.bad_idx}.xyz"
+    last_good_name = f"last-good-{state.good_idx}.xyz"
+
+    lines = [
+        "",
+        "=" * 60,
+        "🎉 BISECT COMPLETE!",
+        "=" * 60,
+        f"Total steps taken:   {len(state.history)}",
+        f"First bad structure: index {state.bad_idx} (frame {state.bad_idx + 1}/{state.num_frames})",
+        f"  -> Saved to:       {state.output_dir / first_bad_name}",
+        f"Last good structure: index {state.good_idx} (frame {state.good_idx + 1}/{state.num_frames})",
+        f"  -> Saved to:       {state.output_dir / last_good_name}",
+        f"Viewer structure:    {state.current_xyz_path} (updated to frame {state.bad_idx})",
+    ]
+
+    # Inform the user if an initial boundary was never explicitly evaluated
+    if state.good_idx == state.initial_good and not any(h["index"] == state.good_idx for h in state.history):
+        lines.append(f"  Note: Frame {state.good_idx} was the initial good boundary and was not explicitly tested.")
+    if state.bad_idx == state.initial_bad and not any(h["index"] == state.bad_idx for h in state.history):
+        lines.append(f"  Note: Frame {state.bad_idx} was the initial bad boundary and was not explicitly tested.")
+
+    lines.append("=" * 60)
+    return "\n".join(lines)
+
+
+def run_bisect(
+    traj_path: Path | str,
+    good_idx: int = 0,
+    bad_idx: Optional[int] = None,
+    output_dir: Path | str = ".",
+    current_name: str = "current.xyz",
+    archive_steps: bool = True,
+    stdin=None,
+    stdout=None,
+) -> int:
+    """
+    Run interactive bisect session.
+    Returns 0 on successful completion, 1 on abort or error.
+    """
+    in_stream = stdin or sys.stdin
+    out_stream = stdout or sys.stdout
+
+    def out_print(*args, **kwargs):
+        print(*args, file=out_stream, **kwargs)
+
+    traj = open_trajectory(traj_path)
+    state = BisectState(
+        traj=traj,
+        good_idx=good_idx,
+        bad_idx=bad_idx,
+        output_dir=output_dir,
+        current_name=current_name,
+        archive_steps=archive_steps,
+    )
+
+    out_print(f"Loaded trajectory '{traj_path}' with {state.num_frames} frames.")
+
+    # Edge case: bounds already meet
+    if state.is_complete():
+        state._write_completion_files()
+        out_print(format_completion_summary(state))
+        return 0
+
+    # Write initial midpoint to current.xyz
+    state.write_current()
+
+    while True:
+        out_print(format_step_banner(state))
+
+        try:
+            out_stream.write("Is this structure good or bad? [g]ood / [b]ad / [?]help: ")
+            out_stream.flush()
+            line = in_stream.readline()
+            if not line:
+                out_print("\nSession ended (EOF).")
+                return 1
+            cmd = line.strip()
+        except (KeyboardInterrupt, EOFError):
+            out_print("\nBisect interrupted by user.")
+            return 1
+
+        if not cmd:
+            continue
+
+        parts = cmd.split()
+        action = parts[0].lower()
+
+        if action in ("g", "good", "y", "yes"):
+            archived, complete = state.record_verdict("good")
+            out_print(f"\n-> Marked structure {state.history[-1]['index']} as GOOD.")
+            if archived:
+                out_print(f"-> Saved archived structure to '{archived.name}'")
+            if complete:
+                out_print(format_completion_summary(state))
+                return 0
+
+        elif action in ("b", "bad", "n", "no"):
+            archived, complete = state.record_verdict("bad")
+            out_print(f"\n-> Marked structure {state.history[-1]['index']} as BAD.")
+            if archived:
+                out_print(f"-> Saved archived structure to '{archived.name}'")
+            if complete:
+                out_print(format_completion_summary(state))
+                return 0
+
+        elif action in ("v", "view"):
+            if len(parts) > 1:
+                target_arg = parts[1].lower()
+                try:
+                    if target_arg in ("start", "first"):
+                        target_idx = 0
+                    elif target_arg in ("last", "end"):
+                        target_idx = state.num_frames - 1
+                    else:
+                        target_idx = int(target_arg)
+                    state.write_current(target_idx, custom_comment=f"Preview frame {target_idx}")
+                    out_print(f"\nPreviewing structure {target_idx} in '{state.current_name}'.")
+                    out_print("Type 'v' with no arguments to restore the current bisect structure.\n")
+                except ValueError:
+                    out_print(f"Invalid index '{parts[1]}'. Must be an integer or 'first'/'last'.")
+                except IndexError as e:
+                    out_print(str(e))
+            else:
+                state.write_current()
+                out_print(f"\nRestored current bisect structure {state.current_mid} to '{state.current_name}'.\n")
+
+        elif action in ("u", "undo"):
+            undone = state.undo()
+            if undone:
+                out_print(f"\nUndid step {undone['step']} (structure {undone['index']}).")
+                out_print(f"Restored search range to [good: {state.good_idx}, bad: {state.bad_idx}].\n")
+            else:
+                out_print("\nNo steps to undo.\n")
+
+        elif action in ("s", "status"):
+            out_print("\n" + format_status(state) + "\n")
+
+        elif action in ("h", "help", "?"):
+            out_print(format_help())
+
+        elif action in ("q", "quit", "exit"):
+            out_print("\nBisect aborted by user.")
+            return 1
+
+        else:
+            out_print(f"Unknown command '{cmd}'. Enter 'g' for good, 'b' for bad, or '?' for help.")
+
+
+def main(argv: Optional[List[str]] = None) -> None:
+    parser = argparse.ArgumentParser(
+        prog="xyz_bisect",
+        description="Binary search a molecular trajectory to find where a molecule went wrong.",
+    )
+    parser.add_argument("traj", help="Input trajectory file (e.g. .traj from ASE)")
+    parser.add_argument(
+        "-g",
+        "--good",
+        type=int,
+        default=0,
+        help="Initial known good structure index (default: 0)",
+    )
+    parser.add_argument(
+        "-b",
+        "--bad",
+        type=int,
+        default=None,
+        help="Initial known bad structure index (default: last frame)",
+    )
+    parser.add_argument(
+        "-o",
+        "--output-dir",
+        default=".",
+        help="Directory to write XYZ files (default: current directory)",
+    )
+    parser.add_argument(
+        "--current-name",
+        default="current.xyz",
+        help="Filename for the active structure being inspected (default: current.xyz)",
+    )
+    parser.add_argument(
+        "--no-archive",
+        action="store_true",
+        help="Disable archiving step-N-idx.xyz files (only write current.xyz)",
+    )
+
+    args = parser.parse_args(argv)
+
+    try:
+        ret = run_bisect(
+            traj_path=args.traj,
+            good_idx=args.good,
+            bad_idx=args.bad,
+            output_dir=args.output_dir,
+            current_name=args.current_name,
+            archive_steps=not args.no_archive,
+        )
+        sys.exit(ret)
+    except Exception as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
